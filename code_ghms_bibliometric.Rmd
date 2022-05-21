@@ -1,5 +1,5 @@
 ---
-title: "XXX"
+title: "The treatment of uncertainties in global water models"
 subtitle: "R code"
 author: "Arnald Puy"
 header-includes:
@@ -34,6 +34,8 @@ knitr::opts_chunk$set(echo = TRUE, dev = "tikz", cache=TRUE)
 
 \newpage
 
+# Preliminary functions 
+
 ```{r packages, results="hide", message=FALSE, warning=FALSE}
 
 # PRELIMINARY FUNCTIONS ----------------------------------------------------------
@@ -51,7 +53,7 @@ loadPackages <- function(x) {
 # Load the packages
 loadPackages(c(
   "bibliometrix", "tidyverse", "data.table", "scales", "pdfsearch", "pdftools", 
-  "openxlsx", "cowplot", "wesanderson"))
+  "openxlsx", "cowplot", "wesanderson", "sjmisc", "ggpubr"))
 
 # Create custom theme
 theme_AP <- function() {
@@ -76,6 +78,10 @@ checkpoint("2022-05-11",
            checkpointLocation = getwd())
 ```
 
+\newpage
+
+# Bibliometric analysis
+
 ```{r vector_models}
 
 # VECTOR WITH NAME OF MODELS ---------------------------------------------------
@@ -86,28 +92,103 @@ models <- c("WaterGAP", "PCR-GLOBWB", "MATSIRO", "H08", "JULES-W1", "MPI-HM",
 models_vec <- paste(models, "_ref.bib", sep = "")
 ```
 
+## Analysis
+
 ```{r bibliometric, results="hide", message=FALSE, dependson="vector_models"}
 
-# BIBLIOMETRIC ANALYSIS OVER ALL BIB FILES  ------------------------------------
+# RUN FOR LOOP -----------------------------------------------------------------
+output <- results <- years <- journals <- dt <- list()
 
-output <- results <- years <- journals <-  list()
 for (i in 1:length(models_vec)) {
   
   output[[i]] <- convert2df(file = models_vec[i], 
                             dbsource = "wos", 
                             format = "bibtex")
   
+  # Extract title --------------------------------------------------------------
+  
+  title <- output[[i]]$TI
+  
+  # Extract Authors, Countries and Universities -------------------------------
+  
+  # Authors 
+  tmp.authors <- output[[i]]$AU 
+  first.author <- sub(" *\\;.*", "", tmp.authors)
+  last.author <- sub(".*\\;","", tmp.authors)
+  
+  # First author affiliation and country
+  country.first <- sub(".*\\,", "", output[[i]]$RP)
+  university.first <- sub(" *\\;.*", "", output[[i]]$affiliations)
+
+  # Last author affiliation and country
+  last.affiliation <- sub(".*\\;", "", output[[i]]$C1)
+  country.last <- sub("\\.", "", sub(".*\\, ", "", last.affiliation))
+  university.last <- sub(".*\\;", "", output[[i]]$affiliations)
+  
+  # Extract keywords ----------------------------------------------------------
+
+  keywords <- gsub(";;", ";", output[[i]]$DE)
+  keywords.plus <- gsub(";;", ";", output[[i]]$ID)
+  
+  # Create data.table ----------------------------------------------------------
+  dt[[i]] <- data.table("WOS" = output[[i]]$UT, 
+                        "title" = title,
+                        "year" = output[[i]]$PY,
+                        "keywords" = keywords,
+                        "keywords.plus" = keywords.plus,
+                        "first.author" = first.author, 
+                        "last.author" = last.author, 
+                        "country.first" = country.first, 
+                        "country.last" = country.last, 
+                        "university.first" = university.first, 
+                        "university.last" = university.last, 
+                        "abstract" = output[[i]]$AB) 
+  
+  # Retrieve analysis bibliometrix ---------------------------------------------
   results[[i]] <- biblioAnalysis(output[[i]], sep = ";")
   years[[i]] <- data.table(results[[i]]$Years)
   journals[[i]] <- data.table(results[[i]]$Sources) %>%
     .[, SO:= str_to_title(SO)] 
 }
+
+names(years) <- models
+names(journals) <- models
+names(dt) <- models
+```
+
+```{r arrange_data, dependson="bibliometric"}
+
+# ARRANGE DATA -----------------------------------------------------------------
+
+# Correct for USA and China
+colsName <- c("country.first", "country.last") 
+full.dt <- rbindlist(dt, idcol = "Model") %>%
+  .[, (colsName):= lapply(.SD, function(x) 
+    ifelse(grepl("USA", x), "USA", x)), .SDcols = colsName] %>%
+  .[, (colsName):= lapply(.SD, function(x) 
+    ifelse(grepl("CHINA", x), "CHINA", x)), .SDcols = colsName]
+
+# Check which studies have "Uncertainty" or "Sensitivity" in keywords,
+# keywords.plus or abstract
+keywords_search <- c("UNCERTAINTY|SENSITIVITY")
+
+tmp <- cbind(str_detect(full.dt$abstract, keywords_search), 
+            str_detect(full.dt$keywords.plus, keywords_search), 
+            str_detect(full.dt$keywords, keywords_search))
+
+full.dt[, "uncertainty.sensitivity":= apply(tmp, 1, function(x) any(x, na.rm = TRUE))]
+
+# Write dataset-
+write.xlsx(full.dt, "full.dt.xlsx")
+
+# Write dataset only with studies that have the keywords
+full.dt[uncertainty.sensitivity == TRUE] %>%
+  write.xlsx(., "full.dt.uncertain.xlsx")
 ```
 
 ```{r plot_time, dependson="bibliometric", warning = FALSE, fig.height=3, fig.width=4.5}
 
 # PLOT ------------------------------------------------------------------------
-
 names(years) <- models
 tmp <- rbindlist(years, idcol = "Model")[, .N, .(V1, Model)]
 
@@ -118,7 +199,7 @@ plot.time <- tmp %>%
   .[, V1:= as.factor(V1)] %>%
   ggplot(., aes(V1, N, fill = Model)) +
   geom_col() +
-  scale_x_discrete(breaks = pretty_breaks(n = 2)) +
+  scale_x_discrete(breaks = pretty_breaks(n = 3)) +
   labs(x = "Year", y = "Nº articles") +
   theme_AP()
 
@@ -127,7 +208,7 @@ plot.time
 
 ```{r plot_journals, dependson="bibliometric", fig.height=6, fig.width=5.5, warning=FALSE}
 
-# PLOT JOURNALS ----------------------------------------------------------------
+# PLOT JOURNALS ---------------------------------------------------------------
 
 rbindlist(journals, idcol = "Models") %>%
   .[, sum(N), SO] %>%
@@ -141,19 +222,174 @@ rbindlist(journals, idcol = "Models") %>%
   theme_AP()
 ```
 
+## Institutional legacy in models
+
+```{r analyse_data, dependson="arrange_data"}
+
+# ANALYSE DATASET --------------------------------------------------------------
+
+dt.use <- full.dt[, .N, .(Model, university.first)] %>%
+  dcast(., university.first~ Model, value.var = "N")
+
+for(j in seq_along(dt.use)){
+  set(dt.use, i = which(is.na(dt.use[[j]]) & is.numeric(dt.use[[j]])), j = j, value = 0)
+}
+
+# Total number each institute uses a model
+dt.use[, total:= rowSums(.SD), .SDcols = models]
+
+# First 50
+dt.50 <- copy(dt.use)[order(-total)][1:50]
+
+# Turn lowercase of institutions except acronyms
+exceptions <- c("USA", "UK", "CNRS", "IIASA", "DOE", "PCSHE", "IIT", "NCAR", 
+                "NOAA")
+pattern <- sprintf("(?:%s)(*SKIP)(*FAIL)|\\b([A-Z])(\\w+)", 
+                   paste0(exceptions, collapse = "|"))
+dt.50 <- dt.50[, university.first:= gsub(pattern, "\\1\\L\\2", 
+                                         university.first, perl = TRUE)]
+
+tmp <- dt.50[, lapply(.SD, function(x) x / total), .SDcols = models] %>%
+  .[, lapply(.SD, round, 2), .SDcols = models]
+```
+
+```{r histogram_legacy, dependson="analyse_data", fig.height=2.5, fig.width=2.5}
+
+# RETRIEVE MAX VALUES PER INSTITUTE ---------------------------------
+
+matrix.50 <- as.matrix(tmp)
+colIndex <- apply(matrix.50, 1, which.max)
+
+out <- vector()
+for(i in 1:length(colIndex)) {
+  out[i] <- matrix.50[[i, colIndex[i]]]
+}
+
+# Compute some statistics on the vector
+f <- c(mean, median, min, max)
+sapply(f, function(f) f(out, na.rm = TRUE))
+
+# Plot
+data.table(out) %>%
+  ggplot(., aes(out)) +
+  geom_histogram() +
+  labs(x = "Fraction", y = "Counts") +
+  theme_AP()
+
+data.table(out) %>%
+  ggplot(., aes(out)) +
+  geom_boxplot() +
+  labs(x = "Fraction", y = "Counts") +
+  theme_AP()
+```
+
+```{r plot_use, dependson="analyse_data", fig.height=7, fig.width=6.5, warning=FALSE}
+
+ # PLOT USE OF MODELS PER INSITUTE ---------------------------------------------
+
+a <- melt(dt.50, measure.vars = models) %>%
+  na.omit() %>%
+  .[, variable:= factor(variable, levels = sort(models))] %>%
+  ggplot(., aes(value, university.first, fill = variable)) + 
+  scale_y_discrete(limits = rev) +
+  labs(x = "Nº of articles", y = "") +
+  scale_fill_discrete(name = "Model") +
+  geom_bar(position = "stack", stat = "identity") + 
+  theme_AP() + 
+  theme(legend.position = "none", 
+        axis.text.y = element_text(size = 9))
+
+b <- melt(dt.50, measure.vars = models) %>%
+  na.omit() %>%
+  .[, variable:= factor(variable, levels = sort(models))] %>%
+  ggplot(., aes(value, university.first, fill = variable)) + 
+  scale_y_discrete(limits = rev) +
+  labs(x = "Fraction", y = "") +
+  scale_fill_discrete(name = "Model") +
+  scale_x_continuous(breaks = pretty_breaks(n = 3)) +
+  geom_bar(position = "fill", stat = "identity") + 
+  theme_AP() + 
+  theme(axis.text.y = element_blank(), 
+        legend.position = "none")
+
+legend <- get_legend(a + theme(legend.position = "top"))
+bottom <- plot_grid(a, b, ncol = 2, labels = "auto", rel_widths = c(0.79 , 0.21))
+ggarrange(legend, bottom, nrow = 2, heights = c(0.1, 0.9))
+```
+
+## Keywords and keywords plus
+
+```{r keywords_analysis, dependson="arrange_data"}
+
+# ANALYSE FREQUENCY OF KEYWORDS AND KEYWORDS PLUS -----------------------------
+
+# Keywords
+strsplit(full.dt$keywords, ";", fixed = TRUE) %>%
+  unlist(lapply(., str_trim)) %>%
+  data.table("keywords" = .) %>%
+  .[, .N, keywords] %>%
+  .[order(-N)] %>%
+  head(50)
+
+# Keywords plus
+strsplit(full.dt$keywords.plus, ";", fixed = TRUE) %>%
+  unlist(lapply(., str_trim)) %>%
+  data.table("keywords.plus" = .) %>%
+  .[, .N, keywords.plus] %>%
+  .[order(-N)] %>%
+  head(50)
+```
+
+```{r plot_bars, warning = FALSE, fig.height=2.5, fig.width=4, dependson="bibliometric"}
+
+# PLOT TOTAL NUMBER OF STUDIES AND TOTAL NUMBER STUDIES WITH KEYWORDS ----------
+
+total.studies <- tmp[, sum(N), Model]
+setnames(total.studies, "V1", "Total")
+
+plot.bars <- full.dt[uncertainty.sensitivity == "TRUE"] %>%
+  .[, sum(uncertainty.sensitivity), Model] %>%
+  merge(., total.studies, by = "Model") %>%
+  melt(., measure.vars = c("V1", "Total")) %>%
+  ggplot(., aes(reorder(Model, value), value, fill = variable)) +
+  coord_flip() +
+  labs(y = "Nº of articles", x = "") +
+  scale_fill_manual(values = wes_palette(2, name = "Darjeeling1"), 
+                    name = "", 
+                    labels = c("$N$ keywords", 
+                               "$N$ total")) +
+  scale_y_log10() +
+  annotation_logticks(sides = "b") +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.6)) +
+  theme_AP() +
+  theme(legend.position = c(0.8, 0.3))
+
+plot.bars
+```
+
+```{r merge_plots1, dependson=c("plot_time", "plot_bars"), fig.height=3.2, fig.width=6, warning=FALSE}
+
+# MERGE PLOTS ------------------------------------------------------------------
+
+legend <- get_legend(plot.time + theme(legend.position = "top"))
+
+bottom <- plot_grid(plot.time + theme(legend.position = "none"), 
+                    plot.bars, ncol = 2, labels = "auto",
+                    rel_widths = c(0.4, 0.6))
+plot_grid(legend, bottom, ncol = 1, rel_heights = c(0.3, 0.7))
+```
+
 ```{r keywords_search, dependson="vector_models", results="hide", message=FALSE, warning=FALSE}
 
 # KEYWORDS SEARCH --------------------------------------------------------------
 
 # Define vectors for search ---------------------------------------------------
-
 directory <- "/Users/arnaldpuy/Documents/papers/ghms_bibliometric/"
 directory_vec <- paste(directory, models, "_pdfs", sep = "") 
 keywords_vec <- c("sensitivity analysis", "uncertainty analysis", "uncertainty")
 filename_keywords <- paste(models, "keywords", sep = "_")
 
 # Loop -------------------------------------------------------------------------
-
 dt <- result <- list()
 for (i in 1:length(directory_vec)) {
   
@@ -168,7 +404,6 @@ for (i in 1:length(directory_vec)) {
   fwrite(dt[[i]], file = paste(filename_keywords[i], ".csv", sep = ""))
   
 }
-
 names(result) <- models
 names(dt) <- models
 ```
@@ -193,39 +428,4 @@ plot.keywords.histogram <- dt.keywords %>%
         strip.text.x = element_text(size = 8))
 
 plot.keywords.histogram
-```
-
-```{r plot_bars, warning = FALSE, fig.height=2.5, fig.width=4}
-
-# PLOT TOTAL NUMBER OF STUDIES AND TOTAL NUMBER STUDIES WITH KEYWORDS ----------
-
-total.studies <- tmp[, sum(N), Model]
-setnames(total.studies, "V1", "Total")
-
-new.colnames <- c("N with keywords", "N Total")
-
-dt.bars <- dt.keywords[, unique(name), Model] %>%
-  .[, .N, Model] %>%
-  merge(., total.studies, by = "Model") %>%
-  setnames(., c("N", "Total"), new.colnames)
-  
-plot.bars <- melt(dt.bars, measure.vars = new.colnames) %>%
-  ggplot(., aes(reorder(Model, value), value, fill = variable)) +
-  coord_flip() +
-  labs(y = "Nº of articles", x = "") +
-  scale_fill_manual(values = wes_palette(2, name = "Darjeeling1"), 
-                    name = "") +
-  geom_bar(stat = "identity", position = position_dodge(width = 0.6)) +
-  theme_AP() +
-  theme(legend.position = c(0.55, 0.25))
-
-plot.bars
-```
-
-```{r merge_plots1, dependson=c("plot_time", "plot_bars"), fig.height=3.5, fig.width=6, warning=FALSE}
-
-# MERGE PLOTS ------------------------------------------------------------------
-
-plot_grid(plot.time, plot.bars, ncol = 2, labels = "auto", rel_widths = c(0.5, 0.5))
-
 ```
