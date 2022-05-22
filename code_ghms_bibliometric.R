@@ -20,7 +20,7 @@ loadPackages <- function(x) {
 loadPackages(c(
   "bibliometrix", "tidyverse", "data.table", "scales", "pdfsearch", "pdftools", 
   "openxlsx", "cowplot", "wesanderson", "sjmisc", "ggpubr", "tm", "syuzhet", 
-  "qdapRegex"))
+  "qdapRegex", "tidytext"))
 
 # Create custom theme
 theme_AP <- function() {
@@ -33,7 +33,7 @@ theme_AP <- function() {
                                     color = NA), 
           strip.background = element_rect(fill = "white"), 
           legend.margin = margin(0.5, 0.1, 0.1, 0.1),
-          legend.box.margin=margin(0.2,-2,-7,-7))
+          legend.box.margin = margin(0.2,-2,-7,-7))
 }
 
 # Set checkpoint
@@ -44,10 +44,37 @@ checkpoint("2022-05-11",
            R.version ="4.2.0", 
            checkpointLocation = getwd())
 
+# FUNCTION TO CLEAN TEXT ######################################################
+
+# Function to remove punctuation, citations, numbers, stopwords in english, 
+# bring to lowercase and strip whitespace, and especial characters, etc...
+clear_text <- function(x) {
+  y <- gsub("-", "", x)
+  y <- rm_citation(y)
+  y <- tm::removePunctuation(y)
+  y <- tm::removeNumbers(y)
+  y <- tm::removeWords(y, stopwords::stopwords(language = "en"))
+  y <- tolower(y)
+  y <- str_replace_all(y, "[[:punct:]]", "") # Remove punctuation characters
+  y <- str_replace_all(y, "[^[:alnum:]]", " ") # Remove all non-alphanumerical
+  y <- tm::stripWhitespace(y)
+  y <- str_squish(y)
+  y <- tm::removeWords(y, c(" et ", "al", "table", "figure", "fig", 
+                            "figs", "can", "eg", "mm", "yr", 
+                            "last", "access", "see", "section"))
+  y <- gsub(" ?doi\\w+ ?", "", y) # Remove words that start with doi
+  y <- str_replace(y, "http", "") # Remove https
+  y <- tm::removeWords(y, stopwords::stopwords(language = "en"))
+  y <- trimws(y) # Remove leading/trailing white space
+  y <- tm::stripWhitespace(y)
+  y <- gsub("\\s[A-Za-z](?= )", "", y, perl = TRUE) # Remove isolated letters
+  y <- gsub("\\s[A-Za-z]$", "", y, perl = TRUE) # Remove isolated letters end of string
+  return(y)
+}
 
 ## ----vector_models--------------------------------------------------
 
-# VECTOR WITH NAME OF MODELS ---------------------------------------------------
+# VECTOR WITH NAME OF MODELS ###################################################
 
 models <- c("WaterGAP", "PCR-GLOBWB", "MATSIRO", "H08", "JULES-W1", "MPI-HM", 
             "MHM", "LPJmL", "CWatM", "CLM", "DBHM", "ORCHIDEE")
@@ -57,8 +84,11 @@ models_vec <- paste(models, "_ref.bib", sep = "")
 
 ## ----bibliometric, results="hide", message=FALSE, dependson="vector_models"----
 
-# RUN FOR LOOP -----------------------------------------------------------------
-output <- results <- years <- journals <- dt <- list()
+# BIBLIOMETRIC ANALYSIS ########################################################
+
+output <- results <- years <- journals <- dt <- dt.clean <- list()
+
+selected_cols <- c("title", "abstract", "keywords", "keywords.plus")
 
 for (i in 1:length(models_vec)) {
   
@@ -105,6 +135,15 @@ for (i in 1:length(models_vec)) {
                         "university.last" = university.last, 
                         "abstract" = output[[i]]$AB) 
   
+  dt.clean[[i]] <- copy(dt[[i]])
+  
+  dt.clean[[i]][, (selected_cols):= lapply(.SD, function(x) 
+    clear_text(x)), .SDcols = selected_cols]
+  
+  # Export data dirty and clean
+  write.xlsx(dt[[i]], file = paste(models[i], "_bibliometric.xlsx", sep = ""))
+  write.xlsx(dt.clean[[i]], file = paste(models[i], "_bibliometric_clean.xlsx", sep = ""))
+  
   # Retrieve analysis bibliometrix ---------------------------------------------
   results[[i]] <- biblioAnalysis(output[[i]], sep = ";")
   years[[i]] <- data.table(results[[i]]$Years)
@@ -112,14 +151,51 @@ for (i in 1:length(models_vec)) {
     .[, SO:= str_to_title(SO)] 
 }
 
+# Add names of models
 names(years) <- models
 names(journals) <- models
 names(dt) <- models
+names(dt.clean) <- models
 
+# KEYWORDS ANALYSIS ############################################################
+
+# Define vectors for search ---------------------------------------------------
+directory <- "/Users/arnaldpuy/Documents/papers/ghms_bibliometric/"
+directory_vec <- paste(directory, models, "_pdfs", sep = "") 
+keywords_vec <- c("sensitivity analysis", "uncertainty analysis", "uncertainty")
+filename_keywords <- paste(models, "keywords", sep = "_")
+
+# Loop -------------------------------------------------------------------------
+dt.keyword <- dt.keyword.clean <- output <- list()
+for (i in 1:length(directory_vec)) {
+  
+  output[[i]] <- keyword_directory(directory_vec[i],
+                                   keyword = keywords_vec,
+                                   split_pdf = TRUE)
+  
+  dt.keyword[[i]] <- data.table("name" = output[[i]]$pdf_name, 
+                                "keyword" = output[[i]]$keyword, 
+                                "text" = output[[i]]$line_text)
+  
+  dt.keyword.clean[[i]] <- copy(dt.keyword[[i]])
+  
+  # Clean the text where the keywords are located
+  dt.keyword.clean[[i]] <- dt.keyword.clean[[i]][, text:= clear_text(text)]
+  
+  # Write dirty and clean data
+  fwrite(dt.keyword[[i]], file = paste(filename_keywords[i], ".csv", sep = ""))
+  fwrite(dt.keyword.clean[[i]], file = paste(filename_keywords[i], "_clean.csv", sep = ""))
+}
+
+names(output) <- models
+names(dt.keyword) <- models
+names(dt.keyword.clean) <- models
 
 ## ----arrange_data, dependson="bibliometric"-------------------------
 
-# ARRANGE DATA -----------------------------------------------------------------
+# ARRANGE DATA #################################################################
+
+# Bibliometric analysis -------------------------
 
 # Correct for USA and China
 colsName <- c("country.first", "country.last") 
@@ -129,40 +205,114 @@ full.dt <- rbindlist(dt, idcol = "Model") %>%
   .[, (colsName):= lapply(.SD, function(x) 
     ifelse(grepl("CHINA", x), "CHINA", x)), .SDcols = colsName]
 
+# Keywords analysis -----------------------------
+full.keyword.dt <- rbindlist(dt.keyword.clean, idcol = "Model")
+
+# DESCRIPTIVE STUDY ############################################################
+
+# Total number of studies
+total.n <- full.dt[, .(Model, WOS)] %>%
+  .[, .(total.papers = .N), Model] %>%
+  .[order(-total.papers)]
+
+total.n
+
+# Plot cumulative number of studies through time
+plot.time <- rbindlist(years, idcol = "Model")[, .N, .(V1, Model)] %>%
+  .[, V1:= as.factor(V1)] %>%
+  ggplot(., aes(V1, N, fill = Model)) +
+  geom_col() +
+  scale_x_discrete(breaks = pretty_breaks(n = 3)) +
+  labs(x = "Year", y = "Nº articles") +
+  theme_AP() + 
+  theme(legend.position = "none")
+
+plot.time
+
+# Calculate Nº of studies with keywords
+plot.n.keywords <- full.keyword.dt[, .N, .(keyword, Model, name)] %>%
+  .[, .N, .(keyword, Model)] %>%
+  merge(., total.n, by = "Model") %>%
+  .[, fraction:= N / total.papers] %>%
+  ggplot(., aes(fraction, keyword, fill = Model)) +
+  geom_bar(stat = "identity") + 
+  labs(x = "Fraction of studies", y = "") +
+  scale_x_continuous(breaks = pretty_breaks(n = 3)) +
+  facet_wrap(~Model) +
+  theme_AP() + 
+  theme(legend.position = "none")
+
+plot.n.keywords
+
+legend <- get_legend(plot.time + theme(legend.position = "top"))
+bottom <- plot_grid(plot.time, plot.n.keywords, ncol = 2, labels = "auto", 
+                    rel_widths = c(0.3, 0.7))
+
+plot_grid(legend, bottom, ncol = 1, rel_heights = c(0.2, 0.8))
+
+full.keyword.dt[, WOS:= gsub(".pdf", "", paste("WOS", name, sep = ""))]
+
+
+# Calculate fraction of studies with keywords through time
+total.n.year <- rbindlist(years, idcol = "Model") %>%
+  .[, .(total.n = .N), V1] %>%
+  setnames(., "V1", "year")
+
+plot.fraction.years <- merge(full.keyword.dt[, .(WOS, keyword)], full.dt[, .(year, WOS)], by = "WOS", all.x = TRUE, 
+      allow.cartesian = TRUE) %>%
+  .[, unique(WOS), .(year, keyword)] %>%
+  .[, .N, .(year, keyword)] %>%
+  merge(., total.n.year, by = "year") %>%
+  .[, fraction:= N / total.n] %>%
+  ggplot(., aes(year, fraction, color = keyword, group = keyword)) +
+  geom_line() + 
+  scale_color_discrete(name = "") +
+  labs(x = "Year", y = "Fraction of articles") +
+  theme_AP() 
+
+plot.fraction.years
+
+
+merge(full.keyword.dt[, .(WOS, keyword, Model)], full.dt[, .(year, WOS, Model)], 
+      by = c("WOS", "Model"), all.x = TRUE, allow.cartesian = TRUE) %>%
+  .[, unique(WOS), .(year, keyword, Model)] %>%
+  .[, .N, .(year, keyword, Model)] %>%
+  merge(., total.n.year, by = "year") %>%
+  .[, fraction:= N / total.n] %>%
+  ggplot(., aes(year, fraction, color = keyword, group = keyword)) +
+  geom_line() + 
+  scale_color_discrete(name = "") +
+  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  facet_wrap(~Model) +
+  labs(x = "Year", y = "Fraction of articles") +
+  theme_AP() 
+
+# PLOT JOURNALS ###############################################################
+
+rbindlist(journals, idcol = "Model") %>%
+  .[, sum(N), .(SO, Model)] %>%
+  .[order(-V1)] %>%
+  .[, .SD[1:25]] %>%
+  na.omit() %>%
+  ggplot(., aes(reorder(SO, V1, sum), V1, fill = Model)) +
+  geom_bar(stat = "identity", position="stack") +
+  coord_flip() +
+  labs(x = "", y = "Nº of articles") +
+  theme_AP()
+
+
+
 
 ########################################
 ########################################
 
 ### WORK IN PROGRESS -----------------------------------------------------------
 
-# Function to remove punctuation, citations, numbers, stopwords in english, 
-# bring to lowercase and strip whitespace, and especial characters, etc...
-clear_text <- function(x) {
-  y <- gsub("-", "", x)
-  y <- rm_citation(y)
-  y <- tm::removePunctuation(y)
-  y <- tm::removeNumbers(y)
-  y <- tm::removeWords(y, stopwords::stopwords(language = "en"))
-  y <- tolower(y)
-  y <- str_replace_all(y, "[[:punct:]]", "") # Remove punctuation characters
-  y <- str_replace_all(y, "[^[:alnum:]]", " ") # Remove all non-alphanumerical
-  y <- tm::stripWhitespace(y)
-  y <- str_squish(y)
-  y <- tm::removeWords(y, c(" et ", "al", "table", "figure", "fig", 
-                            "figs", "can", "eg", "mm", "yr", 
-                            "last", "access", "see", "section"))
-  y <- gsub(" ?doi\\w+ ?", "", y) # Remove words that start with doi
-  y <- str_replace(y, "http", "") # Remove https
-  y <- tm::removeWords(y, stopwords::stopwords(language = "en"))
-  y <- trimws(y) # Remove leading/trailing white space
-  y <- tm::stripWhitespace(y)
-  y <- gsub("\\s[A-Za-z](?= )", "", y, perl = TRUE) # Remove isolated letters
-  y <- gsub("\\s[A-Za-z]$", "", y, perl = TRUE) # Remove isolated letters end of string
-  return(y)
-}
+# Clean full.dt with uncertainty
+full.keyword.dt <- rbindlist(dt.keyword.clean, idcol = "Model")
 
 # Apply
-selected_cols <- c("title", "abstract", "keywords", "keywords.plus")
+
 full.dt[, (selected_cols):= lapply(.SD, function(x)
   clear_text(x)), .SDcols = selected_cols]
 
@@ -225,11 +375,48 @@ ggplot(rank.keywords, aes(reorder(Model, -rank), rank, color = word)) +
   theme_AP() +
   theme(legend.position = "top")
 
+# N-TOKENS --------------------------------------------------------------------
+
+dt.bigrams <- full.keyword.dt %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 3)
+
+vec <- dt.bigrams %>%
+  .[, str_detect(bigram, "uncertainty|sensitivity")]
+
+dt.bigrams[vec] %>%
+  count(bigram, Model, sort = TRUE) %>%
+  .[, head(.SD, 5), Model] %>%
+  ggplot(., aes(reorder(bigram, n), n, fill = Model)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  facet_wrap(~Model, scales = "free_y", ncol = 3) +
+  theme_AP() +
+  theme(legend.position = "none")
+
+
+dt.bigrams %>%
+  count(bigram, Model, keyword, sort = TRUE)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # SENTIMENT ANALYSIS -----------------------------------------------------------
 
-da <- full.dt[, get_nrc_sentiment(abstract), Model]
+da <- full.keyword.dt[, get_nrc_sentiment(text), Model]
 colNames_sentiments <- colnames(da)[-1]
-da[, colSums(.SD), .SDcols = colNames_sentiments, by]
 
 da[, lapply(.SD, sum), by = Model, .SDcols = colNames_sentiments] %>%
   melt(., measure.vars = colNames_sentiments) %>%
@@ -238,23 +425,15 @@ da[, lapply(.SD, sum), by = Model, .SDcols = colNames_sentiments] %>%
   facet_wrap(~Model, scales = "free_x") + 
   theme_AP()
 
-# N-TOKENS --------------------------------------------------------------------
+
+dt.bigrams[vec]
+ 
 
 
+str_detect(bi"uncertainty")
 
 
-
-
-
-
-
-
-
-
-
-
-
-
+str(da)
 
 
 library(qdapRegex)
