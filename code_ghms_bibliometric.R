@@ -20,7 +20,7 @@ loadPackages <- function(x) {
 loadPackages(c(
   "bibliometrix", "tidyverse", "data.table", "scales", "pdfsearch", "pdftools", 
   "openxlsx", "cowplot", "wesanderson", "sjmisc", "ggpubr", "tm", "syuzhet", 
-  "qdapRegex", "tidytext"))
+  "qdapRegex", "tidytext", "igraph", "ggraph"))
 
 # Create custom theme
 theme_AP <- function() {
@@ -57,6 +57,7 @@ clear_text <- function(x) {
   y <- tolower(y)
   y <- str_replace_all(y, "[[:punct:]]", "") # Remove punctuation characters
   y <- str_replace_all(y, "[^[:alnum:]]", " ") # Remove all non-alphanumerical
+  y <- stemDocument(y) # Stem the document and keep only the root of the word
   y <- tm::stripWhitespace(y)
   y <- str_squish(y)
   y <- tm::removeWords(y, c(" et ", "al", "table", "figure", "fig", 
@@ -69,6 +70,7 @@ clear_text <- function(x) {
   y <- tm::stripWhitespace(y)
   y <- gsub("\\s[A-Za-z](?= )", "", y, perl = TRUE) # Remove isolated letters
   y <- gsub("\\s[A-Za-z]$", "", y, perl = TRUE) # Remove isolated letters end of string
+
   return(y)
 }
 
@@ -77,7 +79,7 @@ clear_text <- function(x) {
 # VECTOR WITH NAME OF MODELS ###################################################
 
 models <- c("WaterGAP", "PCR-GLOBWB", "MATSIRO", "H08", "JULES-W1", "MPI-HM", 
-            "MHM", "LPJmL", "CWatM", "CLM", "DBHM", "ORCHIDEE")
+            "MHM", "LPJmL", "CWatM", "CLM", "DBHM", "ORCHIDEE", "GR4J")
 
 models_vec <- paste(models, "_ref.bib", sep = "")
 
@@ -122,6 +124,7 @@ for (i in 1:length(models_vec)) {
   keywords.plus <- gsub(";;", ";", output[[i]]$ID)
   
   # Create data.table ----------------------------------------------------------
+  
   dt[[i]] <- data.table("WOS" = output[[i]]$UT, 
                         "title" = title,
                         "year" = output[[i]]$PY,
@@ -145,6 +148,7 @@ for (i in 1:length(models_vec)) {
   write.xlsx(dt.clean[[i]], file = paste(models[i], "_bibliometric_clean.xlsx", sep = ""))
   
   # Retrieve analysis bibliometrix ---------------------------------------------
+  
   results[[i]] <- biblioAnalysis(output[[i]], sep = ";")
   years[[i]] <- data.table(results[[i]]$Years)
   journals[[i]] <- data.table(results[[i]]$Sources) %>%
@@ -154,7 +158,7 @@ for (i in 1:length(models_vec)) {
 # Add names of models
 names(years) <- models
 names(journals) <- models
-names(dt) <- models
+names(dt.clean) <- models
 names(dt.clean) <- models
 
 # KEYWORDS ANALYSIS ############################################################
@@ -162,15 +166,19 @@ names(dt.clean) <- models
 # Define vectors for search ---------------------------------------------------
 directory <- "/Users/arnaldpuy/Documents/papers/ghms_bibliometric/"
 directory_vec <- paste(directory, models, "_pdfs", sep = "") 
-keywords_vec <- c("sensitivity analysis", "uncertainty analysis", "uncertainty")
 filename_keywords <- paste(models, "keywords", sep = "_")
+
+# Define vectors with keywords ------------------------------------------------
+#keywords_vec <- c("sensitivity analysis", "uncertainty analysis", "uncertainty")
+keywords_vec <- c("uncertainty", "sensitivity")
+keywords_vec_stemmed <- stemDocument(keywords_vec)
 
 # Loop -------------------------------------------------------------------------
 dt.keyword <- dt.keyword.clean <- output <- list()
 for (i in 1:length(directory_vec)) {
   
   output[[i]] <- keyword_directory(directory_vec[i],
-                                   keyword = keywords_vec,
+                                   keyword = keywords_vec_stemmed,
                                    split_pdf = TRUE)
   
   dt.keyword[[i]] <- data.table("name" = output[[i]]$pdf_name, 
@@ -199,7 +207,7 @@ names(dt.keyword.clean) <- models
 
 # Correct for USA and China
 colsName <- c("country.first", "country.last") 
-full.dt <- rbindlist(dt, idcol = "Model") %>%
+full.dt <- rbindlist(dt.clean, idcol = "Model") %>%
   .[, (colsName):= lapply(.SD, function(x) 
     ifelse(grepl("USA", x), "USA", x)), .SDcols = colsName] %>%
   .[, (colsName):= lapply(.SD, function(x) 
@@ -217,6 +225,8 @@ total.n <- full.dt[, .(Model, WOS)] %>%
 
 total.n
 
+sum(total.n$total.papers)
+
 # Plot cumulative number of studies through time
 plot.time <- rbindlist(years, idcol = "Model")[, .N, .(V1, Model)] %>%
   .[, V1:= as.factor(V1)] %>%
@@ -229,63 +239,74 @@ plot.time <- rbindlist(years, idcol = "Model")[, .N, .(V1, Model)] %>%
 
 plot.time
 
-# Calculate Nº of studies with keywords
-plot.n.keywords <- full.keyword.dt[, .N, .(keyword, Model, name)] %>%
-  .[, .N, .(keyword, Model)] %>%
-  merge(., total.n, by = "Model") %>%
-  .[, fraction:= N / total.papers] %>%
-  ggplot(., aes(fraction, keyword, fill = Model)) +
+# Calculate fraction of studies with keywords in the abstract
+full.dt[, `:=` (uncertainti = str_detect(abstract, keywords_vec_stemmed[1]), 
+                sensit = str_detect(abstract, keywords_vec_stemmed[2]))] 
+
+plot.n.keywords <- full.dt[, lapply(.SD, function(x) 
+  sum(x) / .N), .SDcols = (keywords_vec_stemmed), Model] %>%
+  melt(., measure.vars = keywords_vec_stemmed) %>%
+  ggplot(., aes(value, variable, fill = Model)) +
   geom_bar(stat = "identity") + 
   labs(x = "Fraction of studies", y = "") +
-  scale_x_continuous(breaks = pretty_breaks(n = 3)) +
+  scale_x_continuous(breaks = pretty_breaks(n = 3), 
+                     limits = c(0, 1)) +
   facet_wrap(~Model) +
   theme_AP() + 
   theme(legend.position = "none")
-
+  
 plot.n.keywords
 
 legend <- get_legend(plot.time + theme(legend.position = "top"))
 bottom <- plot_grid(plot.time, plot.n.keywords, ncol = 2, labels = "auto", 
                     rel_widths = c(0.3, 0.7))
 
-plot_grid(legend, bottom, ncol = 1, rel_heights = c(0.2, 0.8))
-
-full.keyword.dt[, WOS:= gsub(".pdf", "", paste("WOS", name, sep = ""))]
-
+all.plots <- plot_grid(legend, bottom, ncol = 1, rel_heights = c(0.2, 0.8))
+all.plots
 
 # Calculate fraction of studies with keywords through time
 total.n.year <- rbindlist(years, idcol = "Model") %>%
   .[, .(total.n = .N), V1] %>%
   setnames(., "V1", "year")
 
-plot.fraction.years <- merge(full.keyword.dt[, .(WOS, keyword)], full.dt[, .(year, WOS)], by = "WOS", all.x = TRUE, 
-      allow.cartesian = TRUE) %>%
-  .[, unique(WOS), .(year, keyword)] %>%
-  .[, .N, .(year, keyword)] %>%
+plot.fraction.years <- full.dt[, .(WOS, uncertainti, sensit, year)] %>%
+  melt(., measure.var = keywords_vec_stemmed) %>%
+  .[value == TRUE, .N, .(year, variable)] %>%
   merge(., total.n.year, by = "year") %>%
   .[, fraction:= N / total.n] %>%
-  ggplot(., aes(year, fraction, color = keyword, group = keyword)) +
+  ggplot(., aes(year, fraction, color = variable, group = variable)) +
   geom_line() + 
   scale_color_discrete(name = "") +
+  scale_y_continuous(limits = c(0, 1)) +
   labs(x = "Year", y = "Fraction of articles") +
-  theme_AP() 
+  theme_AP() +
+  theme(legend.position = c(0.4, 0.85))
 
 plot.fraction.years
 
-
-merge(full.keyword.dt[, .(WOS, keyword, Model)], full.dt[, .(year, WOS, Model)], 
-      by = c("WOS", "Model"), all.x = TRUE, allow.cartesian = TRUE) %>%
-  .[, unique(WOS), .(year, keyword, Model)] %>%
-  .[, .N, .(year, keyword, Model)] %>%
+# Per model
+plot.fraction.years.model <- full.dt[, .(WOS, uncertainti, sensit, year, Model)] %>%
+  melt(., measure.var = keywords_vec_stemmed) %>%
+  .[value == TRUE, .N, .(year, variable, Model)] %>%
   merge(., total.n.year, by = "year") %>%
   .[, fraction:= N / total.n] %>%
-  ggplot(., aes(year, fraction, color = keyword, group = keyword)) +
+  ggplot(., aes(year, fraction, color = variable, group = variable)) +
   geom_line() + 
-  scale_color_discrete(name = "") +
-  scale_x_continuous(breaks = pretty_breaks(n = 4)) +
+  geom_point() +
   facet_wrap(~Model) +
-  labs(x = "Year", y = "Fraction of articles") +
-  theme_AP() 
+  scale_color_discrete(name = "") +
+  scale_y_continuous(limits = c(0, 1), breaks = pretty_breaks(n = 3)) +
+  scale_x_continuous(breaks = pretty_breaks(n = 3)) +
+  labs(x = "Year", y = "") +
+  theme_AP() +
+  theme(legend.position = "none")
+
+plot.fraction.years.model
+
+bottom <- plot_grid(plot.fraction.years, plot.fraction.years.model, 
+                    ncol = 2, labels = c("c", "d"), rel_widths = c(0.3, 0.7))
+
+plot_grid(all.plots, bottom, ncol = 1, labels = "", rel_heights = c(0.6, 0.4))
 
 # PLOT JOURNALS ###############################################################
 
@@ -294,33 +315,17 @@ rbindlist(journals, idcol = "Model") %>%
   .[order(-V1)] %>%
   .[, .SD[1:25]] %>%
   na.omit() %>%
-  ggplot(., aes(reorder(SO, V1, sum), V1, fill = Model)) +
-  geom_bar(stat = "identity", position="stack") +
+  ggplot(., aes(reorder(SO, V1, sum), V1)) +
+  geom_bar(stat = "identity") +
   coord_flip() +
   labs(x = "", y = "Nº of articles") +
   theme_AP()
 
 
+# TEXT MINING: TREATMENT OF UNCERTAINTIES ######################################
+################################################################################
 
-
-########################################
-########################################
-
-### WORK IN PROGRESS -----------------------------------------------------------
-
-# Clean full.dt with uncertainty
-full.keyword.dt <- rbindlist(dt.keyword.clean, idcol = "Model")
-
-# Apply
-
-full.dt[, (selected_cols):= lapply(.SD, function(x)
-  clear_text(x)), .SDcols = selected_cols]
-
-# Calculate total number of papers per Model
-total.papers.dt <- full.dt[, .(Model, WOS)] %>%
-  .[, .(total.papers = .N), Model]
-
-# CREATE WORDCLOUD OF WORDS IN ABSTRACT-------------------------------------------------------
+# CREATE WORDCLOUD OF WORDS IN ABSTRACT ########################################
 
 tmp <- split(full.dt, full.dt$Model)
 names(tmp) <- models
@@ -352,17 +357,16 @@ for(i in names(word.count)) {
 
 plots.wordcloud
 
-# CHECK RANK OF THE TERMS "UNCERTAINTY" AND "SENSITIVITY" ----------------------
-
-keywords_vec <- c("uncertainty", "sensitivity")
+# Check rank of the terms "uncertainty" and "sensitivity" in the abstract -----
 
 word.count.dt[, rank:= frank(-freq, ties.method = "first"), Model]
 
-rank.keywords <- word.count.dt[word %in% keywords_vec] %>%
-  merge(., total.papers.dt, by = "Model") %>%
-  .[, fraction:= freq / total.papers]
+rank.keywords <- word.count.dt[word %in% keywords_vec_stemmed] %>%
+  merge(., total.papers.dt, by = "Model") 
 
 rank.keywords
+
+rank.keywords[order(rank)]
 
 # Plot-------------------------------------------
 
@@ -374,6 +378,415 @@ ggplot(rank.keywords, aes(reorder(Model, -rank), rank, color = word)) +
                        labels = c("Sensitivity", "Uncertainty")) +
   theme_AP() +
   theme(legend.position = "top")
+
+# STUDY OF N-TOKENS ###########################################################
+
+# Number of tokens ------------------------------
+N.tokens <- 2
+
+# For loop --------------------------------------
+output <- sentiment.analysis <- token.analysis <- colNames_sentiments <- 
+  plot.sentiment.analysis <- vec <- plot.token <- plot.token.model <- list()
+
+for (i in 1:length(keywords_vec)) {
+  
+  output[[i]] <- full.keyword.dt %>%
+    .[keyword == keywords_vec_stemmed[i]]
+  
+  # Token analysis -------------------------------------------------------------
+  
+  token.analysis[[i]] <- output[[i]] %>%
+    unnest_tokens(bigram, text, token = "ngrams", n = N.tokens) %>%
+    separate(bigram, into = c("word1", "word2"), sep = " ") %>%
+    # We count the co-occurences of words without taking into account their order
+    # within the n-token
+    .[, `:=`(word1= pmin(word1, word2), word2 = pmax(word1, word2))] %>%
+    count(word1, word2, Model, sort = TRUE) %>%
+    unite(., col = "bigram", c("word1", "word2"), sep = " ")
+  
+  vec[[i]] <- token.analysis[[i]] %>%
+    .[, str_detect(bigram, keywords_vec_stemmed[i])]
+  
+  plot.token[[i]] <- token.analysis[[i]][vec[[i]]] %>%
+    .[, head(.SD, 5), Model] %>%
+    ggplot(., aes(reorder(bigram, n, sum), n)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme_AP() +
+    labs(y = "$n$", x = "") +
+    theme(legend.position = "none") +
+    ggtitle(keywords_vec_stemmed[i])
+  
+  plot.token.model[[i]] <- token.analysis[[i]][vec[[i]]] %>%
+    .[, head(.SD, 5), Model] %>%
+    ggplot(., aes(reorder(bigram, n, sum), n, fill = Model)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme_AP() +
+    labs(y = "$n$", x = "") +
+    theme(legend.position = "none") +
+    ggtitle(keywords_vec_stemmed[i]) +
+    facet_wrap(~Model, scales = "free", ncol = 3) 
+  
+  # Sentiment analysis ---------------------------------------------------------
+  
+  # Only tokens that appear more than 10 times and then select only the words
+  # that accompany uncertainty and sensitivity
+  sentiment.analysis[[i]] <- token.analysis[[i]][n > 10] %>%
+    .[, words:= str_remove(bigram, c("uncertainty|sensitivity"))] %>%
+    .[, get_nrc_sentiment(bigram), Model]
+  colNames_sentiments[[i]] <- colnames(sentiment.analysis[[i]])[-1]
+  plot.sentiment.analysis[[i]] <- sentiment.analysis[[i]][, lapply(.SD, sum), 
+                                                          by = Model,
+                                                          .SDcols = colNames_sentiments[[i]]] %>%
+    melt(., measure.vars = colNames_sentiments[[i]]) %>%
+    ggplot(., aes(value, variable, fill = variable)) + 
+    geom_bar(stat = "identity") +
+    facet_wrap(~Model, scales = "free_x") + 
+    theme_AP() +
+    ggtitle(keywords_vec[i])
+  
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+token.analysis[[i]] <- output[[1]] %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = N.tokens) %>%
+  separate(bigram, into = c("word1", "word2"), sep = " ") %>%
+  # We count the co-occurences of words without taking into account their order
+  # within the n-token
+  .[, `:=`(word1= pmin(word1, word2), word2 = pmax(word1, word2))] %>%
+  count(word1, word2, Model, sort = TRUE) %>%
+  unite(., col = "bigram", c("word1", "word2"), sep = " ")
+
+vec[[i]] <- token.analysis %>%
+  .[, str_detect(bigram, keywords_vec_stemmed[1])]
+
+plot.token[[i]] <- token.analysis[[i]][vec[[i]]] %>%
+  .[, head(.SD, 5), Model] %>%
+  ggplot(., aes(reorder(bigram, n, sum), n)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  theme_AP() +
+  labs(y = "$n$", x = "") +
+  theme(legend.position = "none") +
+  ggtitle(keywords_vec_stemmed[i])
+
+plot.token.model[[i]] <- token.analysis[[i]][vec[[i]]] %>%
+  .[, head(.SD, 5), Model] %>%
+  ggplot(., aes(reorder(bigram, n, sum), n, fill = Model)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  theme_AP() +
+  labs(y = "$n$", x = "") +
+  theme(legend.position = "none") +
+  ggtitle(keywords_vec_stemmed[i]) +
+  facet_wrap(~Model, scales = "free", ncol = 3) 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Only tokens that appear more than 10 times
+sentiment.analysis <- token.analysis[[1]][n > 10] %>%
+  .[, words:= str_remove(bigram, c("uncertainty|sensitivity"))] %>%
+  .[, get_nrc_sentiment(bigram), Model]
+colNames_sentiments[[i]] <- colnames(sentiment.analysis[[i]])[-1]
+plot.sentiment.analysis[[i]] <- sentiment.analysis[[i]][, lapply(.SD, sum), 
+                                                        by = Model,
+                                                        .SDcols = colNames_sentiments[[i]]] %>%
+  melt(., measure.vars = colNames_sentiments[[i]]) %>%
+  ggplot(., aes(value, variable, fill = variable)) + 
+  geom_bar(stat = "identity") +
+  facet_wrap(~Model, scales = "free_x") + 
+  theme_AP() +
+  ggtitle(keywords_vec[i])
+
+
+
+
+token.analysis[[1]]
+
+sentiment.analysis[[i]] <- token.analysis[[1]] %>%
+  .[n > 10] %>%
+  .[, get_nrc_sentiment(bigram), Model]
+
+colNames_sentiments[[i]] <- colnames(sentiment.analysis[[i]])[-1]
+plot.sentiment.analysis[[i]] <- sentiment.analysis[[i]][, lapply(.SD, sum), 
+                                                        by = Model,
+                                                        .SDcols = colNames_sentiments[[i]]] %>%
+  melt(., measure.vars = colNames_sentiments[[i]]) %>%
+  ggplot(., aes(value, variable, fill = variable)) + 
+  geom_bar(stat = "identity") +
+  facet_wrap(~Model, scales = "free_x") + 
+  theme_AP() +
+  ggtitle(keywords_vec[i])
+
+
+
+
+
+
+
+
+
+
+
+token.analysis <- output[[1]] %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = N.tokens) %>%
+  separate(bigram, into = c("word1", "word2"), sep = " ") %>%
+  # We count the co-occurences of words without taking into account their order
+  # within the n-token
+  .[, `:=`(word1= pmin(word1, word2), word2 = pmax(word1, word2))] %>%
+  count(word1, word2, Model, sort = TRUE) %>%
+  unite(., col = "bigram", c("word1", "word2"), sep = " ")
+
+vec <- token.analysis %>%
+  .[, str_detect(bigram, keywords_vec[1])]
+
+token.analysis[vec] %>%
+  .[, head(.SD, 5), Model] %>%
+  ggplot(., aes(reorder(bigram, n, sum), n)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  theme_AP() +
+  labs(y = "$n$", x = "") +
+  theme(legend.position = "none") +
+  ggtitle(keywords_vec[i])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+enframe(c("a b c a d e")) %>% 
+  unnest_tokens(skipgram, value, token = "skip_ngrams", n = 5) %>% 
+  mutate(n_words = str_count(skipgram, pattern = "\\S+")) %>%
+  filter(n_words == 2) %>% 
+  separate(col = skipgram, into = c("word1", "word2"), 
+           sep = "\\s+") %>%
+  transmute(word11 = pmin(word1, word2), word22 = pmax(word1, word2)) %>%
+  count(word11, word22)
+
+
+
+
+output[[1]] %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = N.tokens) %>%
+  separate(bigram, into = c("word1", "word2"), sep = " ") %>%
+  .[, `:=`(word1= pmin(word1, word2), word2 = pmax(word1, word2))] %>%
+  count(word1, word2, Model, sort = TRUE) %>%
+  unite(., col = "bigram", c("word1", "word2"), sep = " ")
+
+
+
+transmute(word11 = pmin(word1, word2), word22 = pmax(word1, word2)) %>%
+
+
+
+
+
+
+
+
+
+
+bigram_graph <- token.analysis[[3]][vec[[3]]] %>%
+  count(bigram, Model, sort = TRUE) %>%
+  .[n >= 10] %>%
+  .[, .(bigram, n)] %>%
+  graph_from_data_frame()
+
+
+
+
+library(ggraph)
+set.seed(123)
+
+a <- grid::arrow(type = "closed", length = unit(.15, "inches"))
+
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link() +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+
+
+
+
+
+for (i in 1:length(keywords_vec)) {
+  
+  output[[i]] <- full.keyword.dt %>%
+    .[keyword == keywords_vec[i]]
+  
+  # Sentiment analysis ---------------------------------------------------------
+  
+  sentiment.analysis[[i]] <- output[[i]][, get_nrc_sentiment(text), Model]
+  colNames_sentiments[[i]] <- colnames(sentiment.analysis[[i]])[-1]
+  plot.sentiment.analysis[[i]] <- sentiment.analysis[[i]][, lapply(.SD, sum), 
+                                                          by = Model,
+                                                          .SDcols = colNames_sentiments[[i]]] %>%
+    melt(., measure.vars = colNames_sentiments[[i]]) %>%
+    ggplot(., aes(value, variable, fill = variable)) + 
+    geom_bar(stat = "identity") +
+    facet_wrap(~Model, scales = "free_x") + 
+    theme_AP() +
+    ggtitle(keywords_vec[i])
+  
+  # Token analysis -------------------------------------------------------------
+  
+  token.analysis[[i]] <- output[[i]] %>%
+    unnest_tokens(bigram, text, 
+                  token = "ngrams", 
+                  n = N.tokens)
+  vec[[i]] <- token.analysis[[i]] %>%
+    .[, str_detect(bigram, keywords_vec[i])]
+  
+  plot.token[[i]] <- token.analysis[[i]][vec[[i]]] %>%
+    count(bigram, Model, sort = TRUE) %>%
+    .[, head(.SD, 5), Model] %>%
+    ggplot(., aes(reorder(bigram, n), n, fill = Model)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    facet_wrap(~Model, scales = "free", ncol = 3) +
+    theme_AP() +
+    labs(y = "$n$", x = "") +
+    theme(legend.position = "none") +
+    ggtitle(keywords_vec[i])
+  
+}
+
+
+
+
+
+
+
+
+
+
+
+dt.bigrams[vec] %>%
+  count(bigram, Model, sort = TRUE) %>%
+  .[, head(.SD, 5), Model] %>%
+  ggplot(., aes(reorder(bigram, n), n, fill = Model)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  facet_wrap(~Model, scales = "free_y", ncol = 3) +
+  theme_AP() +
+  theme(legend.position = "none") +
+  ggtitle(names(keywords_vec[i]))
+
+
+
+
+
+
+da <- full.keyword.dt[, get_nrc_sentiment(text), Model]
+colNames_sentiments <- colnames(da)[-1]
+
+da[, lapply(.SD, sum), by = Model, .SDcols = colNames_sentiments] %>%
+  melt(., measure.vars = colNames_sentiments) %>%
+  ggplot(., aes(value, variable, fill = variable)) + 
+  geom_bar(stat = "identity") +
+  facet_wrap(~Model, scales = "free_x") + 
+  theme_AP()
+
+
+
+# STUDY OF N-TOKENS ############################################################
+
+# N-TOKENS --------------------------------------------------------------------
+
+dt.bigrams <- full.keyword.dt %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 3)
+
+vec <- dt.bigrams %>%
+  .[, str_detect(bigram, "uncertainty|sensitivity|uncertainty analysis")]
+
+dt.bigrams[vec] %>%
+  count(bigram, Model, sort = TRUE) %>%
+  .[, head(.SD, 5), Model] %>%
+  ggplot(., aes(reorder(bigram, n), n, fill = Model)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  facet_wrap(~Model, scales = "free_y", ncol = 3) +
+  theme_AP() +
+  theme(legend.position = "none") +
+  ggtitle(names(keywords_vec[i]))
+
+
+dt.bigrams %>%
+  count(bigram, Model, keyword, sort = TRUE)
+
+
+
+
+
+
+
+
+########################################
+########################################
+
+### WORK IN PROGRESS -----------------------------------------------------------
+
+
 
 # N-TOKENS --------------------------------------------------------------------
 
