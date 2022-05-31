@@ -1,5 +1,5 @@
 
-# code_ghms_bibliometric
+# The treatment of uncertainties in global water models
 
-Work in progress on global water models.
+Work in progress.
 
