@@ -54,7 +54,7 @@ loadPackages <- function(x) {
 loadPackages(c(
   "bibliometrix", "tidyverse", "data.table", "scales", "pdfsearch", "pdftools", 
   "openxlsx", "cowplot", "wesanderson", "sjmisc", "ggpubr", "tm", "syuzhet", 
-  "qdapRegex", "tidytext", "igraph", "ggraph"))
+  "qdapRegex", "tidytext", "igraph", "ggraph", "benchmarkme", "parallel"))
 
 # Create custom theme
 theme_AP <- function() {
@@ -122,7 +122,8 @@ clear_text <- function(x) {
 # VECTOR WITH NAME OF MODELS ###################################################
 
 models <- c("WaterGAP", "PCR-GLOBWB", "MATSIRO", "H08", "JULES-W1", "MPI-HM", 
-            "MHM", "LPJmL", "CWatM", "CLM", "DBHM", "ORCHIDEE", "GR4J")
+            "MHM", "LPJmL", "CWatM", "CLM", "DBHM", "ORCHIDEE", "GR4J", 
+            "SACRAMENTO", "PRMS")
 
 models_vec <- paste(models, "_ref.bib", sep = "")
 ```
@@ -317,10 +318,10 @@ plot.time
 
 ```{r fraction_unc, dependson="arrange_data", fig.height=2.5, fig.width=2.5}
 
-# FRACTION OF STUDIES WITH UNCERTAINTI AND SENSIT* IN THE ABSTRACT #############
+# FRACTION OF STUDIES WITH UNCERTAINTI AND SENSIT* AS KEYWORDS #################
 
-full.dt <- full.dt[, `:=` (uncertainti = str_detect(abstract, keywords_vec_stemmed[1]), 
-                           sensit = str_detect(abstract, keywords_vec_stemmed[2]))] 
+full.dt <- full.dt[, `:=` (uncertainti = str_detect(keywords, keywords_vec_stemmed[1]), 
+                           sensit = str_detect(keywords, keywords_vec_stemmed[2]))] 
 
 plot.n.keywords <- full.dt[, lapply(.SD, function(x) 
   sum(x) / .N), .SDcols = (keywords_vec_stemmed), Model] %>%
@@ -340,7 +341,7 @@ plot.n.keywords
 full.dt[uncertainti == "TRUE" & sensit == "TRUE", .N] / full.dt[, .N]
 ```
 
-```{r keywords_time, fig.height=2.5, fig.width=3.5, dependson="arrange_data"}
+```{r keywords_time, fig.height=2.5, fig.width=3.5, dependson=c("arrange_data", "fraction_unc")}
 
 # FRACTION OF STUDIES WITH KEYWORDS THROUGH TIME ###############################
 
@@ -359,12 +360,35 @@ plot.fraction.years <- full.dt[, .(WOS, uncertainti, sensit, year)] %>%
   scale_y_continuous(limits = c(0, 1)) +
   labs(x = "Year", y = "Fraction of articles") +
   theme_AP() +
-  theme(legend.position = c(0.2, 0.75))
+  theme(legend.position = c(0.35, 0.75))
 
 plot.fraction.years
 ```
 
-```{r merge_plots_descriptive, fig.height=4.8, fig.width=5.5, dependson=c("keywords_time", "fraction_unc", "cumulative_plot"), warning=FALSE}
+```{r plot_dist, dependson="arrange_data", warning=FALSE, fig.width=3, fig.height=2}
+
+# PLOT HISTOGRAM ###############################################################
+
+dist.plot <- full.keyword.dt[, .N, .(name, keyword)] %>%
+  .[, keyword:= factor(keyword, levels = keywords_vec_stemmed)] %>%
+  ggplot(., aes(N, fill = keyword)) +
+  geom_histogram(color = "black") + 
+  labs(x = "Nº of mentions in text", y = "Nº articles") +
+  facet_wrap(~keyword) + 
+  scale_x_continuous(breaks = pretty_breaks(n = 3)) +
+  theme_AP() + 
+  theme(legend.position = "none")
+
+dist.plot
+
+# How many articles have 1, 2, ... N mentions of uncertainti and sensit in the 
+# main text ------------------------------------------------------
+full.keyword.dt[, .N, .(name, keyword)] %>%
+  .[, .(number.articles = .N), .(N, keyword)] %>%
+  .[.[order(N),.I[1:.N],"keyword"]$V1]
+```
+
+```{r merge_plots_descriptive, fig.height=4.8, fig.width=5.7, dependson=c("keywords_time", "fraction_unc", "cumulative_plot", "plot_dist"), warning=FALSE}
 
 # MERGE DESCRIPTIVE PLOTS ######################################################
 
@@ -372,7 +396,10 @@ legend <- get_legend(plot.time + theme(legend.position = "top"))
 top <- plot_grid(plot.time, plot.n.keywords, ncol = 2, labels = "auto", 
                  rel_widths = c(0.65, 0.35))
 all <- plot_grid(legend, top, ncol = 1, rel_heights = c(0.22, 0.78))
-plot_grid(all, plot.fraction.years, 
+bottom <- plot_grid(plot.fraction.years, dist.plot, ncol = 2, labels = c("c", "d"), 
+                    rel_widths = c(0.5, 0.5))
+
+plot_grid(all, bottom, 
           ncol = 1, labels = "", rel_heights = c(0.6, 0.4))
 ```
 
@@ -429,7 +456,8 @@ for(i in names(word.count)) {
 word.count.dt[, rank:= frank(-freq, ties.method = "first"), Model]
 
 rank.keywords <- word.count.dt[word %chin% keywords_vec_stemmed] %>%
-  merge(., total.n, by = "Model") 
+  merge(., total.n, by = "Model") %>%
+  .[, word:= factor(word, levels = keywords_vec_stemmed)] 
 
 rank.keywords[order(word, rank)]
 
@@ -533,7 +561,7 @@ for (i in 1:length(keywords_vec)) {
 plot_grid(plotlist = plot.token, ncol = 2, labels = "")
 ```
 
-```{r plot_permodel, dependson="tokens", fig.height=6, fig.width=5}
+```{r plot_permodel, dependson="tokens", fig.height=6, fig.width=5.5}
 
 # PLOT 5 MOST BIGRAMS ##########################################################
 
@@ -545,4 +573,26 @@ sapply(1:2, function(i) plot.token.model[i])
 # PLOT NETWORKS OF BIGRAMS #####################################################
 
 sapply(1:2, function(i) graph_plot[i])
+```
+
+\newpage
+
+# Session information
+
+```{r session_information}
+
+# SESSION INFORMATION ##########################################################
+
+sessionInfo()
+
+## Return the machine CPU
+cat("Machine:     "); print(get_cpu()$model_name)
+
+## Return number of true cores
+cat("Num cores:   "); print(detectCores(logical = FALSE))
+
+## Return number of threads
+cat("Num threads: "); print(detectCores(logical = FALSE))
+```
+
 ```

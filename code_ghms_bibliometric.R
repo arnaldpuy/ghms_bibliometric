@@ -84,7 +84,8 @@ clear_text <- function(x) {
 # VECTOR WITH NAME OF MODELS ###################################################
 
 models <- c("WaterGAP", "PCR-GLOBWB", "MATSIRO", "H08", "JULES-W1", "MPI-HM", 
-            "MHM", "LPJmL", "CWatM", "CLM", "DBHM", "ORCHIDEE", "GR4J")
+            "MHM", "LPJmL", "CWatM", "CLM", "DBHM", "ORCHIDEE", "GR4J", 
+            "SACRAMENTO")
 
 models_vec <- paste(models, "_ref.bib", sep = "")
 
@@ -273,8 +274,8 @@ plot.time
 
 # FRACTION OF STUDIES WITH UNCERTAINTI AND SENSIT* IN THE ABSTRACT #############
 
-full.dt <- full.dt[, `:=` (uncertainti = str_detect(abstract, keywords_vec_stemmed[1]), 
-                           sensit = str_detect(abstract, keywords_vec_stemmed[2]))] 
+full.dt <- full.dt[, `:=` (uncertainti = str_detect(keywords.plus, keywords_vec_stemmed[1]), 
+                           sensit = str_detect(keywords.plus, keywords_vec_stemmed[2]))] 
 
 plot.n.keywords <- full.dt[, lapply(.SD, function(x) 
   sum(x) / .N), .SDcols = (keywords_vec_stemmed), Model] %>%
@@ -318,6 +319,32 @@ plot.fraction.years <- full.dt[, .(WOS, uncertainti, sensit, year)] %>%
 plot.fraction.years
 
 
+full.dt[, .(Model, year, uncertainti, sensit)]
+####################
+####################
+
+dist.plot <- full.keyword.dt[, .N, .(name, keyword)] %>%
+  .[, keyword:= factor(keyword, levels = keywords_vec_stemmed)] %>%
+  ggplot(., aes(N)) +  geom_vline(xintercept = 5) +
+  stat_ecdf(geom = "step") +
+  labs(x = "Nº of mentions in text", y = "Nº articles") +
+  facet_wrap(~keyword) + 
+  theme_AP()
+
+dist.plot
+
+
+full.keyword.dt[, .N, .(name, keyword)] %>%
+  .[, keyword:= factor(keyword, levels = keywords_vec_stemmed)] %>%
+  ggplot(., aes(N)) +
+  geom_histogram() + 
+  labs(x = "Nº of mentions in text", y = "Nº articles") +
+  facet_wrap(~keyword) + 
+  theme_AP()
+
+####################
+####################
+
 ## ----merge_plots_descriptive, fig.height=4.8, fig.width=5.5, dependson=c("keywords_time", "fraction_unc", "cumulative_plot"), warning=FALSE----
 
 # MERGE DESCRIPTIVE PLOTS ######################################################
@@ -326,7 +353,10 @@ legend <- get_legend(plot.time + theme(legend.position = "top"))
 top <- plot_grid(plot.time, plot.n.keywords, ncol = 2, labels = "auto", 
                  rel_widths = c(0.65, 0.35))
 all <- plot_grid(legend, top, ncol = 1, rel_heights = c(0.22, 0.78))
-plot_grid(all, plot.fraction.years, 
+bottom <- plot_grid(plot.fraction.years, dist.plot, ncol = 2, labels = c("c", "d"), 
+                    rel_widths = c(0.5, 0.5))
+
+plot_grid(all, bottom, 
           ncol = 1, labels = "", rel_heights = c(0.6, 0.4))
 
 
@@ -383,7 +413,8 @@ for(i in names(word.count)) {
 word.count.dt[, rank:= frank(-freq, ties.method = "first"), Model]
 
 rank.keywords <- word.count.dt[word %chin% keywords_vec_stemmed] %>%
-  merge(., total.n, by = "Model") 
+  merge(., total.n, by = "Model") %>%
+  .[, word:= factor(word, levels = keywords_vec_stemmed)] 
 
 rank.keywords[order(word, rank)]
 
@@ -497,4 +528,44 @@ sapply(1:2, function(i) plot.token.model[i])
 # PLOT NETWORKS OF BIGRAMS #####################################################
 
 sapply(1:2, function(i) graph_plot[i])
+
+
+data(USArrests)
+
+hclust(dist(da[, .(bigram, n)]))
+
+
+
+
+data(agriculture)
+data(flower)
+
+library(cluster)
+da <- token.analysis[[1]][vec[[1]]] %>%
+  .[, head(.SD, 5), Model] %>%
+  .[, `:=` (bigram = str_remove(bigram, keywords_vec_stemmed[1]), 
+            Model = as.factor(Model))] %>%
+  .[, bigram:= factor(bigram)]
+
+str(da)
+# calculate distance
+
+dist<-daisy(data.frame(da))
+#make a hierarchical cluster model
+model<-hclust(dist)
+
+#plotting the hierarchy
+plot(model)
+
+
+d_dist<-daisy(da[, .(bigram, n)], metric = "gower")
+# hierarchical clustering
+hc<-hclust(d_dist, method = "complete")
+# dendrogram 
+plot(hc, labels=FALSE)
+rect.hclust(hc, k=8, border="red")
+# choose k, number of clusters 
+cluster<-cutree(hc, k=8)
+# add cluster to original data 
+df<-cbind(df,as.factor(cluster))
 
